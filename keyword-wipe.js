@@ -14,14 +14,15 @@
 
   const SETTINGS = {
     MAX_DELETIONS: 500,
-    ACTION_DELAY_MS: 1700,
     LOAD_DELAY_MS: 2400,
-    ERROR_BACKOFF_MS: 20000,
-    COOLDOWN_EVERY: 25,
-    COOLDOWN_MS: 12000,
+    ERROR_BACKOFF_MS: 15000,
+    COOLDOWN_EVERY: 20,
+    COOLDOWN_MS: 10000,
     ACTION_RETRIES: 4,
     STALLS_TO_END_PASS: 6,
-    MAX_DELETE_PASSES: 4,
+    MAX_DELETE_PASSES: 5,
+    SHOW_CONFIRM_MS: 550,
+    VERIFY_TIMEOUT_MS: 7000,
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -68,27 +69,27 @@
     throw new Error(`Safety check: your X search must include from:${username}`);
   }
 
-  function getTweetId(article) {
+  function getOwnTweetId(article) {
+    const target = username.toLowerCase();
+
     for (const link of article.querySelectorAll('a[href*="/status/"]')) {
-      const match = (link.getAttribute('href') || '').match(/\/status\/(\d+)/);
-      if (match) return match[1];
+      const href = link.getAttribute('href') || '';
+      const match = href.match(/^\/([^/]+)\/status\/(\d+)/i);
+
+      if (
+        match &&
+        match[1].toLowerCase() === target &&
+        link.querySelector('time')
+      ) {
+        return match[2];
+      }
     }
+
     return null;
   }
 
   function isOwnPost(article) {
-    const target = username.toLowerCase();
-
-    return [...article.querySelectorAll('a[href*="/status/"]')].some((link) => {
-      const href = link.getAttribute('href') || '';
-      const match = href.match(/^\/([^/]+)\/status\/(\d+)/i);
-
-      return Boolean(
-        match &&
-        match[1].toLowerCase() === target &&
-        link.querySelector('time')
-      );
-    });
+    return Boolean(getOwnTweetId(article));
   }
 
   function getOwnPostText(article) {
@@ -107,9 +108,13 @@
       .filter((article) => article.isConnected);
   }
 
+  function findOwnArticleById(id) {
+    return visibleArticles().find((article) => getOwnTweetId(article) === id) || null;
+  }
+
   function signature() {
     return visibleArticles()
-      .map((article) => getTweetId(article) || '?')
+      .map((article) => getOwnTweetId(article) || '?')
       .join('|');
   }
 
@@ -151,6 +156,33 @@
     );
   }
 
+  async function verifyRemoved(id) {
+    const start = Date.now();
+    let missingChecks = 0;
+
+    while (Date.now() - start < SETTINGS.VERIFY_TIMEOUT_MS) {
+      if (window.X_KEYWORD_CLEANER_STOP) {
+        throw new Error('Stopped.');
+      }
+
+      if (hasXError()) return 'error';
+
+      if (!findOwnArticleById(id)) {
+        missingChecks += 1;
+
+        // Require several consecutive checks so a quick React rerender is
+        // not mistaken for a successful deletion.
+        if (missingChecks >= 3) return 'removed';
+      } else {
+        missingChecks = 0;
+      }
+
+      await sleep(350);
+    }
+
+    return 'still-there';
+  }
+
   async function scrollSearchPass(onMatch) {
     window.scrollTo({ top: 0, behavior: 'auto' });
     await sleep(1600);
@@ -160,15 +192,25 @@
 
     while (!window.X_KEYWORD_CLEANER_STOP && stalls < SETTINGS.STALLS_TO_END_PASS) {
       const articles = visibleArticles();
+      let restartScan = false;
 
       for (const article of articles) {
         if (!article.isConnected || !matchesKeyword(article)) continue;
+
         const shouldRestart = await onMatch(article);
+
+        // Important: after a delete, X rerenders the timeline. Throw away
+        // the old article list and rescan instead of counting stale nodes.
         if (shouldRestart) {
-          stalls = 0;
-          await sleep(450);
-          continue;
+          restartScan = true;
+          break;
         }
+      }
+
+      if (restartScan) {
+        stalls = 0;
+        await sleep(700);
+        continue;
       }
 
       const before = signature();
@@ -214,18 +256,27 @@
   }
 
   async function deleteArticle(article) {
-    const id = getTweetId(article);
+    const id = getOwnTweetId(article);
+    const originalText = getOwnPostText(article);
+
     if (!id || !article.isConnected || !matchesKeyword(article)) return false;
 
     for (let attempt = 1; attempt <= SETTINGS.ACTION_RETRIES; attempt += 1) {
-      if (!article.isConnected) return true;
+      const currentArticle = findOwnArticleById(id);
 
-      article.scrollIntoView({ block: 'center', behavior: 'auto' });
+      // A stale/disconnected article is NOT counted as a deletion.
+      if (!currentArticle) {
+        warn(`Lost sight of ${id} before deleting it. Rescanning instead of counting it.`);
+        return false;
+      }
+
+      currentArticle.scrollIntoView({ block: 'center', behavior: 'auto' });
       await sleep(450);
 
-      const caret = article.querySelector('[data-testid="caret"]');
+      const caret = currentArticle.querySelector('[data-testid="caret"]');
       if (!caret) {
-        await sleep(650);
+        warn(`Could not open the menu for ${id}. Retry ${attempt}/${SETTINGS.ACTION_RETRIES}`);
+        await sleep(700);
         continue;
       }
 
@@ -242,8 +293,8 @@
 
       if (!deleteItem) {
         document.body.click();
-        warn(`Could not find Delete for ${id}. Retrying...`);
-        await sleep(800);
+        warn(`Could not find Delete for ${id}. Retry ${attempt}/${SETTINGS.ACTION_RETRIES}`);
+        await sleep(850);
         continue;
       }
 
@@ -263,29 +314,39 @@
 
       if (!confirm) {
         document.body.click();
-        warn(`Could not find the delete confirmation for ${id}. Retrying...`);
+        warn(`Could not find the delete confirmation for ${id}. Retry ${attempt}/${SETTINGS.ACTION_RETRIES}`);
         await sleep(900);
         continue;
       }
 
+      // Leave X's own Delete confirmation visible briefly. This makes the
+      // action obvious to the user and gives the UI time to settle.
+      await sleep(SETTINGS.SHOW_CONFIRM_MS);
       confirm.click();
-      await sleep(SETTINGS.ACTION_DELAY_MS);
 
-      if (hasXError()) {
-        warn('X returned an error. Waiting before trying again...');
+      const result = await verifyRemoved(id);
+
+      if (result === 'removed') {
+        log(`VERIFIED DELETED ${id}: ${originalText.slice(0, 90)}`);
+        return true;
+      }
+
+      if (result === 'error') {
+        warn(`X reported an error for ${id}. Waiting before retrying...`);
         await sleep(SETTINGS.ERROR_BACKOFF_MS);
         continue;
       }
 
-      log(`Deleted ${id}: ${getOwnPostText(article).slice(0, 90)}`);
-      return true;
+      warn(`Delete for ${id} was NOT verified. The post is still visible. Retry ${attempt}/${SETTINGS.ACTION_RETRIES}`);
+      document.body.click();
+      await sleep(1200);
     }
 
-    warn(`Skipped ${id} after repeated errors. You can rerun the script later.`);
+    warn(`Could not verify deletion of ${id}. It was NOT added to the deleted count.`);
     return false;
   }
 
-  // Preview the matching posts first.
+  // Preview matching posts first.
   const previewIds = new Set();
   const previewRows = [];
 
@@ -295,7 +356,7 @@
   log('Scanning first. Nothing is being deleted yet.');
 
   await scrollSearchPass(async (article) => {
-    const id = getTweetId(article);
+    const id = getOwnTweetId(article);
     if (!id || previewIds.has(id)) return false;
 
     previewIds.add(id);
@@ -357,7 +418,7 @@
   console.log('');
   console.log('==============================');
   console.log('X KEYWORD CLEANER FINISHED');
-  console.log(`Deleted this run: ${deleted}`);
+  console.log(`Verified deleted this run: ${deleted}`);
   console.log('Reload the same X search and check what remains. Rerun if needed.');
   console.log('==============================');
 })();
