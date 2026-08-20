@@ -10,12 +10,6 @@ So I made this simple X keyword cleaner.
 >
 > **Not affiliated with X.** X can change its website, so the script may need updates from time to time.
 
-## Demo
-
-**Demo video:** `PASTE_YOUR_DEMO_VIDEO_LINK_HERE`
-
----
-
 # How to use
 
 ## 1. Search for the old posts/replies
@@ -32,13 +26,13 @@ Example:
 from:demzey1 catwifdog
 ```
 
-Then click **Latest** and make sure the results are the posts/replies you actually want gone.
+Click **Latest** and make sure the results are the posts/replies you actually want gone.
 
 ---
 
 ## 2. Open the Console
 
-On the X search page:
+On that X search page:
 
 **Right-click → Inspect → Console**
 
@@ -48,29 +42,23 @@ Windows shortcut:
 Ctrl + Shift + J
 ```
 
-Mac shortcut:
-
-```text
-Command + Option + J
-```
-
 ---
 
 ## 3. Put your keyword in the script
 
-At the very top of the script, find:
+At the very top, find:
 
 ```javascript
 const KEYWORDS = ['PUT YOUR KEYWORD HERE'];
 ```
 
-Replace the text inside the `[ ]` with your keyword:
+Replace only the words inside the `[ ]`:
 
 ```javascript
 const KEYWORDS = ['catwifdog'];
 ```
 
-For more than one spelling/name:
+More than one spelling:
 
 ```javascript
 const KEYWORDS = ['catwifdog', 'cat wif dog', '$catwifdog'];
@@ -82,15 +70,25 @@ const KEYWORDS = ['catwifdog', 'cat wif dog', '$catwifdog'];
 
 ## 4. Run it
 
-1. Copy the full script below.
+1. Copy the whole script.
 2. Paste it into the X Console.
 3. Press **Enter**.
-4. It will scan and show what it found first.
-5. A normal browser popup will ask if you want to delete the matching results.
-6. Click **OK** to delete them, or **Cancel** to stop.
+4. It scans your search first and shows what it found.
+5. Click **OK** on the one popup if the results look right.
+6. You will see X's normal **Delete** confirmation appear for each post. The script clicks it automatically.
 7. Keep the X tab open while it runs.
 
-When it finishes, reload the same X search. If X missed a few or stopped loading, run it again.
+The script only increases the deleted count after it verifies that the matching result disappeared. If X refuses a deletion, it retries instead of pretending it worked.
+
+When it finishes, reload the same search and run it again if anything is still there.
+
+---
+
+## If it says `ERR_BLOCKED_BY_CLIENT`
+
+That usually means an ad blocker/privacy extension blocked one of X's requests.
+
+Temporarily pause the blocker for **x.com**, reload X, and run the cleaner again.
 
 ---
 
@@ -99,11 +97,10 @@ When it finishes, reload the same X search. If X missed a few or stopped loading
 - Use it on **your own X account only**.
 - You do **not** need to give anyone your X password, cookies, auth token, or API key.
 - Deleting posts is permanent.
-- The script only deletes **your own posts/replies whose visible text contains the keyword you entered**.
-- If your reply was something like `bullish` and did **not** actually contain the project name, this keyword cleaner may not find it.
-- If the browser/X crashes, reopen the same search and run the script again.
+- The script only targets **your own posts/replies whose visible text contains the keyword you entered**.
+- If X or your browser crashes, reopen the same search and run it again.
 
-To stop a running cleaner, reload/close the tab or enter:
+Emergency stop:
 
 ```javascript
 window.X_KEYWORD_CLEANER_STOP = true
@@ -113,7 +110,7 @@ window.X_KEYWORD_CLEANER_STOP = true
 
 # Full script
 
-Open [`keyword-wipe.js`](./keyword-wipe.js) or copy it below.
+You can also open [`keyword-wipe.js`](./keyword-wipe.js).
 
 ```javascript
 (async () => {
@@ -132,14 +129,15 @@ Open [`keyword-wipe.js`](./keyword-wipe.js) or copy it below.
 
   const SETTINGS = {
     MAX_DELETIONS: 500,
-    ACTION_DELAY_MS: 1700,
     LOAD_DELAY_MS: 2400,
-    ERROR_BACKOFF_MS: 20000,
-    COOLDOWN_EVERY: 25,
-    COOLDOWN_MS: 12000,
+    ERROR_BACKOFF_MS: 15000,
+    COOLDOWN_EVERY: 20,
+    COOLDOWN_MS: 10000,
     ACTION_RETRIES: 4,
     STALLS_TO_END_PASS: 6,
-    MAX_DELETE_PASSES: 4,
+    MAX_DELETE_PASSES: 5,
+    SHOW_CONFIRM_MS: 550,
+    VERIFY_TIMEOUT_MS: 7000,
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -186,27 +184,27 @@ Open [`keyword-wipe.js`](./keyword-wipe.js) or copy it below.
     throw new Error(`Safety check: your X search must include from:${username}`);
   }
 
-  function getTweetId(article) {
+  function getOwnTweetId(article) {
+    const target = username.toLowerCase();
+
     for (const link of article.querySelectorAll('a[href*="/status/"]')) {
-      const match = (link.getAttribute('href') || '').match(/\/status\/(\d+)/);
-      if (match) return match[1];
+      const href = link.getAttribute('href') || '';
+      const match = href.match(/^\/([^/]+)\/status\/(\d+)/i);
+
+      if (
+        match &&
+        match[1].toLowerCase() === target &&
+        link.querySelector('time')
+      ) {
+        return match[2];
+      }
     }
+
     return null;
   }
 
   function isOwnPost(article) {
-    const target = username.toLowerCase();
-
-    return [...article.querySelectorAll('a[href*="/status/"]')].some((link) => {
-      const href = link.getAttribute('href') || '';
-      const match = href.match(/^\/([^/]+)\/status\/(\d+)/i);
-
-      return Boolean(
-        match &&
-        match[1].toLowerCase() === target &&
-        link.querySelector('time')
-      );
-    });
+    return Boolean(getOwnTweetId(article));
   }
 
   function getOwnPostText(article) {
@@ -225,9 +223,13 @@ Open [`keyword-wipe.js`](./keyword-wipe.js) or copy it below.
       .filter((article) => article.isConnected);
   }
 
+  function findOwnArticleById(id) {
+    return visibleArticles().find((article) => getOwnTweetId(article) === id) || null;
+  }
+
   function signature() {
     return visibleArticles()
-      .map((article) => getTweetId(article) || '?')
+      .map((article) => getOwnTweetId(article) || '?')
       .join('|');
   }
 
@@ -269,6 +271,33 @@ Open [`keyword-wipe.js`](./keyword-wipe.js) or copy it below.
     );
   }
 
+  async function verifyRemoved(id) {
+    const start = Date.now();
+    let missingChecks = 0;
+
+    while (Date.now() - start < SETTINGS.VERIFY_TIMEOUT_MS) {
+      if (window.X_KEYWORD_CLEANER_STOP) {
+        throw new Error('Stopped.');
+      }
+
+      if (hasXError()) return 'error';
+
+      if (!findOwnArticleById(id)) {
+        missingChecks += 1;
+
+        // Require several consecutive checks so a quick React rerender is
+        // not mistaken for a successful deletion.
+        if (missingChecks >= 3) return 'removed';
+      } else {
+        missingChecks = 0;
+      }
+
+      await sleep(350);
+    }
+
+    return 'still-there';
+  }
+
   async function scrollSearchPass(onMatch) {
     window.scrollTo({ top: 0, behavior: 'auto' });
     await sleep(1600);
@@ -278,15 +307,25 @@ Open [`keyword-wipe.js`](./keyword-wipe.js) or copy it below.
 
     while (!window.X_KEYWORD_CLEANER_STOP && stalls < SETTINGS.STALLS_TO_END_PASS) {
       const articles = visibleArticles();
+      let restartScan = false;
 
       for (const article of articles) {
         if (!article.isConnected || !matchesKeyword(article)) continue;
+
         const shouldRestart = await onMatch(article);
+
+        // Important: after a delete, X rerenders the timeline. Throw away
+        // the old article list and rescan instead of counting stale nodes.
         if (shouldRestart) {
-          stalls = 0;
-          await sleep(450);
-          continue;
+          restartScan = true;
+          break;
         }
+      }
+
+      if (restartScan) {
+        stalls = 0;
+        await sleep(700);
+        continue;
       }
 
       const before = signature();
@@ -332,18 +371,27 @@ Open [`keyword-wipe.js`](./keyword-wipe.js) or copy it below.
   }
 
   async function deleteArticle(article) {
-    const id = getTweetId(article);
+    const id = getOwnTweetId(article);
+    const originalText = getOwnPostText(article);
+
     if (!id || !article.isConnected || !matchesKeyword(article)) return false;
 
     for (let attempt = 1; attempt <= SETTINGS.ACTION_RETRIES; attempt += 1) {
-      if (!article.isConnected) return true;
+      const currentArticle = findOwnArticleById(id);
 
-      article.scrollIntoView({ block: 'center', behavior: 'auto' });
+      // A stale/disconnected article is NOT counted as a deletion.
+      if (!currentArticle) {
+        warn(`Lost sight of ${id} before deleting it. Rescanning instead of counting it.`);
+        return false;
+      }
+
+      currentArticle.scrollIntoView({ block: 'center', behavior: 'auto' });
       await sleep(450);
 
-      const caret = article.querySelector('[data-testid="caret"]');
+      const caret = currentArticle.querySelector('[data-testid="caret"]');
       if (!caret) {
-        await sleep(650);
+        warn(`Could not open the menu for ${id}. Retry ${attempt}/${SETTINGS.ACTION_RETRIES}`);
+        await sleep(700);
         continue;
       }
 
@@ -360,8 +408,8 @@ Open [`keyword-wipe.js`](./keyword-wipe.js) or copy it below.
 
       if (!deleteItem) {
         document.body.click();
-        warn(`Could not find Delete for ${id}. Retrying...`);
-        await sleep(800);
+        warn(`Could not find Delete for ${id}. Retry ${attempt}/${SETTINGS.ACTION_RETRIES}`);
+        await sleep(850);
         continue;
       }
 
@@ -381,29 +429,39 @@ Open [`keyword-wipe.js`](./keyword-wipe.js) or copy it below.
 
       if (!confirm) {
         document.body.click();
-        warn(`Could not find the delete confirmation for ${id}. Retrying...`);
+        warn(`Could not find the delete confirmation for ${id}. Retry ${attempt}/${SETTINGS.ACTION_RETRIES}`);
         await sleep(900);
         continue;
       }
 
+      // Leave X's own Delete confirmation visible briefly. This makes the
+      // action obvious to the user and gives the UI time to settle.
+      await sleep(SETTINGS.SHOW_CONFIRM_MS);
       confirm.click();
-      await sleep(SETTINGS.ACTION_DELAY_MS);
 
-      if (hasXError()) {
-        warn('X returned an error. Waiting before trying again...');
+      const result = await verifyRemoved(id);
+
+      if (result === 'removed') {
+        log(`VERIFIED DELETED ${id}: ${originalText.slice(0, 90)}`);
+        return true;
+      }
+
+      if (result === 'error') {
+        warn(`X reported an error for ${id}. Waiting before retrying...`);
         await sleep(SETTINGS.ERROR_BACKOFF_MS);
         continue;
       }
 
-      log(`Deleted ${id}: ${getOwnPostText(article).slice(0, 90)}`);
-      return true;
+      warn(`Delete for ${id} was NOT verified. The post is still visible. Retry ${attempt}/${SETTINGS.ACTION_RETRIES}`);
+      document.body.click();
+      await sleep(1200);
     }
 
-    warn(`Skipped ${id} after repeated errors. You can rerun the script later.`);
+    warn(`Could not verify deletion of ${id}. It was NOT added to the deleted count.`);
     return false;
   }
 
-  // Preview the matching posts first.
+  // Preview matching posts first.
   const previewIds = new Set();
   const previewRows = [];
 
@@ -413,7 +471,7 @@ Open [`keyword-wipe.js`](./keyword-wipe.js) or copy it below.
   log('Scanning first. Nothing is being deleted yet.');
 
   await scrollSearchPass(async (article) => {
-    const id = getTweetId(article);
+    const id = getOwnTweetId(article);
     if (!id || previewIds.has(id)) return false;
 
     previewIds.add(id);
@@ -475,16 +533,8 @@ Open [`keyword-wipe.js`](./keyword-wipe.js) or copy it below.
   console.log('');
   console.log('==============================');
   console.log('X KEYWORD CLEANER FINISHED');
-  console.log(`Deleted this run: ${deleted}`);
+  console.log(`Verified deleted this run: ${deleted}`);
   console.log('Reload the same X search and check what remains. Rerun if needed.');
   console.log('==============================');
 })();
 ```
-
----
-
-## If it stops working
-
-X changes its website sometimes. Open an issue on this repo and say what happened.
-
-**Never post your password, cookies, auth token, or private session information in an issue.**
